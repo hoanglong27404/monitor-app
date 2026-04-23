@@ -1,0 +1,36 @@
+name: Swagger API Monitor
+
+on:
+  schedule:
+    - cron: '0 2,4,6,8 * * 1-5'  # UTC 2,4,6,8h = VN 9,11,13,15h T2-T6
+  workflow_dispatch:
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install anthropic requests
+
+      - name: Run Swagger monitor
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python swagger_monitor_once.py
+
+      - name: Commit snapshot if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add api_snapshot.json
+          git diff --cached --quiet || git commit -m "chore: update api_snapshot.json [skip ci]"
+          git push
