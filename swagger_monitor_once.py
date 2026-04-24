@@ -10,186 +10,126 @@ TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID")
 SWAGGER_URL        = "https://eleclab-api.onrender.com/swagger-json"
 SNAPSHOT_FILE      = "api_snapshot.json"
 
-
 def fetch_spec():
-    r = requests.get(SWAGGER_URL, timeout=30)
-    r.raise_for_status()
-    return r.json()
-
-
-def load_snapshot():
-    try:
-        with open(SNAPSHOT_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except FileNotFoundError:
+        try:
+                    r = requests.get(SWAGGER_URL, timeout=15)
+                    return r.json()
+except Exception as e:
         return None
 
+def load_snapshot():
+        try:
+                    return json.load(open(SNAPSHOT_FILE))
+                except:
+        return None
 
 def save_snapshot(spec):
-    with open(SNAPSHOT_FILE, "w", encoding="utf-8") as f:
-        json.dump(spec, f, ensure_ascii=False, indent=2)
-
+        json.dump(spec, open(SNAPSHOT_FILE, 'w'), indent=2)
 
 def extract_endpoints(spec):
-    endpoints = {}
-    for path, methods in spec.get("paths", {}).items():
-        for method, details in methods.items():
-            if method in ["get", "post", "put", "patch", "delete", "options"]:
-                key = f"{method.upper()} {path}"
-                response_codes = list(details.get("responses", {}).keys())
-                params = [
-                    {"name": p.get("name"), "required": p.get("required", False), "in": p.get("in")}
-                    for p in details.get("parameters", [])
-                ]
-                req_body = None
-                if "requestBody" in details:
-                    content = details["requestBody"].get("content", {})
-                    if "application/json" in content:
-                        schema = content["application/json"].get("schema", {})
-                        req_body = list(schema.get("properties", {}).keys()) if "properties" in schema else schema.get("$ref")
-
-                endpoints[key] = {
-                    "summary":             details.get("summary", ""),
-                    "tags":                details.get("tags", []),
-                    "params":              params,
-                    "response_codes":      response_codes,
-                    "request_body_fields": req_body,
-                    "security":            bool(details.get("security")),
-                }
-    return endpoints
-
+        endpoints = {}
+        for path, methods in spec.get('paths', {}).items():
+                    for method, info in methods.items():
+                                    if method in ['get','post','put','delete','patch']:
+                                                        key = f"{method.upper()} {path}"
+                                                        endpoints[key] = {
+                                                            'summary': info.get('summary',''),
+                                                            'tags': info.get('tags',[]),
+                                                            'params': [p.get('name') for p in info.get('parameters',[])]
+                                                        }
+                                            return endpoints
 
 def compare_specs(old_spec, new_spec):
-    old_eps = extract_endpoints(old_spec)
-    new_eps = extract_endpoints(new_spec)
+        old_ep = extract_endpoints(old_spec)
+        new_ep = extract_endpoints(new_spec)
+        old_keys = set(old_ep.keys())
+        new_keys = set(new_ep.keys())
+        added   = new_keys - old_keys
+        removed = old_keys - new_keys
+        changed = {k for k in old_keys & new_keys if old_ep[k] != new_ep[k]}
+        old_schemas = set(old_spec.get('components',{}).get('schemas',{}).keys())
+        new_schemas = set(new_spec.get('components',{}).get('schemas',{}).keys())
+        return {
+            'added':   sorted(added),
+            'removed': sorted(removed),
+            'changed': sorted(changed),
+            'schemas_added':   sorted(new_schemas - old_schemas),
+            'schemas_removed': sorted(old_schemas - new_schemas),
+        }
 
-    added   = {k: v for k, v in new_eps.items() if k not in old_eps}
-    removed = {k: v for k, v in old_eps.items() if k not in new_eps}
-    changed = {}
+def send_telegram(text):
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        if len(text) > 4000:
+                    text = text[:3990] + "\n_(cat ngan)_"
+                requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "Markdown"})
 
-    for key in old_eps:
-        if key in new_eps and old_eps[key] != new_eps[key]:
-            old_val, new_val = old_eps[key], new_eps[key]
-            diff = {
-                field: {"before": old_val.get(field), "after": new_val.get(field)}
-                for field in set(list(old_val.keys()) + list(new_val.keys()))
-                if old_val.get(field) != new_val.get(field)
-            }
-            if diff:
-                changed[key] = diff
-
-    old_schemas = set(old_spec.get("components", {}).get("schemas", {}).keys())
-    new_schemas = set(new_spec.get("components", {}).get("schemas", {}).keys())
-
-    return {
-        "endpoints_added":   added,
-        "endpoints_removed": removed,
-        "endpoints_changed": changed,
-        "schemas_added":     list(new_schemas - old_schemas),
-        "schemas_removed":   list(old_schemas - new_schemas),
-        "has_changes":       bool(added or removed or changed or (new_schemas - old_schemas) or (old_schemas - new_schemas))
-    }
-
-
-def analyze_diff_with_claude(diff):
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-
-    prompt = f"""Bạn là chuyên gia phân tích API. Dưới đây là sự thay đổi trong Swagger spec của hệ thống ElecLab:
-
-{json.dumps(diff, ensure_ascii=False, indent=2)}
-
-Hãy viết báo cáo ngắn gọn cho developer bằng tiếng Việt, dùng emoji:
-1. 🆕 Endpoints mới (nếu có) — nêu rõ endpoint và tác dụng
-2. ❌ Endpoints bị xóa (nếu có) — cảnh báo breaking change
-3. ✏️ Endpoints thay đổi (nếu có) — nêu rõ thay đổi gì (thêm/bớt param, thay đổi response codes...)
-4. 📦 Schemas mới/xóa (nếu có)
-5. ⚠️ Đánh giá mức độ ảnh hưởng: THẤP / TRUNG BÌNH / CAO
-
-Nếu không có thay đổi quan trọng, chỉ cần nói "Không có thay đổi đáng kể."
-Giữ ngắn gọn, dưới 300 từ."""
-
+def analyze_diff_with_claude(diff, new_spec):
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    summary = (
+                f"Added: {len(diff['added'])} | Removed: {len(diff['removed'])} | Changed: {len(diff['changed'])}"
+    )
+    details = ""
+    if diff['added']:
+                details += "Added:\n" + "\n".join(f"  + {e}" for e in diff['added'][:5]) + "\n"
+            if diff['removed']:
+                        details += "Removed:\n" + "\n".join(f"  - {e}" for e in diff['removed'][:5]) + "\n"
+                    if diff['changed']:
+                                details += "Changed:\n" + "\n".join(f"  ~ {e}" for e in diff['changed'][:5]) + "\n"
+                            prompt = (
+                                        "Ban la chuyen gia phan tich API. Day la su thay doi trong Swagger spec cua he thong ElecLab:\n"
+                                        f"{summary}\n{details}\n"
+                                        "Hay phan tich ngan gon bang tieng Viet:\n"
+                                        "1. Muc do anh huong (CAO/TRUNG BINH/THAP)\n"
+                                        "2. Co breaking change khong?\n"
+                                        "3. Frontend can lam gi?\n"
+                                        "Giu ngan gon, duoi 200 tu."
+                            )
     msg = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=600,
-        messages=[{"role": "user", "content": prompt}]
+                model="claude-sonnet-4-6",
+                max_tokens=400,
+                messages=[{"role": "user", "content": prompt}]
     )
     return msg.content[0].text
 
-
-def send_telegram(text, parse_mode="Markdown"):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    if len(text) > 4000:
-        text = text[:3990] + "\n\n_(tin nhắn bị cắt ngắn)_"
-    requests.post(url, json={
-        "chat_id":    TELEGRAM_CHAT_ID,
-        "text":       text,
-        "parse_mode": parse_mode
-    })
-
-
-def health_check():
-    try:
-        r = requests.get("https://eleclab-api.onrender.com/api/health", timeout=10)
-        data = r.json()
-        status = data.get("status", "unknown")
-        uptime = round(data.get("uptime", 0) / 3600, 1)
-        db     = data.get("database", "unknown")
-        return f"✅ *API Health OK*\nStatus: `{status}` | DB: `{db}` | Uptime: `{uptime}h`"
-    except Exception as e:
-        return f"🔴 *API Health FAILED*\n`{str(e)}`"
-
-
-def monitor_job():
-    now = datetime.now().strftime("%d/%m/%Y %H:%M")
-    print(f"[{now}] Đang kiểm tra API spec...")
-
-    try:
-        new_spec = fetch_spec()
-    except Exception as e:
-        send_telegram(f"⚠️ *Không thể fetch Swagger spec*\n`{str(e)}`")
-        return
-
-    old_spec = load_snapshot()
-
-    if old_spec is None:
-        save_snapshot(new_spec)
-        eps     = extract_endpoints(new_spec)
-        schemas = new_spec.get("components", {}).get("schemas", {})
-        msg = (
-            f"🚀 *ElecLab API Monitor — Khởi động*\n"
-            f"🕐 {now}\n\n"
-            f"📊 Tổng quan ban đầu:\n"
-            f"• Endpoints: `{len(eps)}`\n"
-            f"• Schemas: `{len(schemas)}`\n"
-            f"• Tags: `{len(set(t for ep in eps.values() for t in ep['tags']))}`\n\n"
-            f"✅ Snapshot đã lưu. Từ đây mọi thay đổi sẽ được thông báo."
-        )
-        send_telegram(msg)
-        print("  → Snapshot khởi tạo xong.")
-        return
-
-    diff = compare_specs(old_spec, new_spec)
-
-    if not diff["has_changes"]:
-        print("  → Không có thay đổi.")
-        return
-
-    print("  → Phát hiện thay đổi! Gọi Claude phân tích...")
-    analysis = analyze_diff_with_claude(diff)
-
-    stats = (
-        f"📋 *ElecLab API — Phát hiện thay đổi*\n"
-        f"🕐 {now}\n\n"
-        f"• 🆕 Thêm: `{len(diff['endpoints_added'])}` endpoints\n"
-        f"• ❌ Xóa: `{len(diff['endpoints_removed'])}` endpoints\n"
-        f"• ✏️ Sửa: `{len(diff['endpoints_changed'])}` endpoints\n"
-        f"• 📦 Schema: +`{len(diff['schemas_added'])}` / -`{len(diff['schemas_removed'])}`\n\n"
-    )
-
-    send_telegram(stats + analysis)
-    save_snapshot(new_spec)
-    print("  → Đã gửi Telegram và cập nhật snapshot.")
-
-
 if __name__ == "__main__":
-    monitor_job()  # Chỉ chạy 1 lần rồi thoát
+        now = datetime.now().strftime("%d/%m/%Y %H:%M")
+    new_spec = fetch_spec()
+    if not new_spec:
+                send_telegram(f"Khong the fetch Swagger spec tu {SWAGGER_URL}")
+else:
+        old_snapshot = load_snapshot()
+        if not old_snapshot:
+                        save_snapshot(new_spec)
+                        ep_count = len(extract_endpoints(new_spec))
+                        schemas  = len(new_spec.get('components',{}).get('schemas',{}))
+                        tags     = len(new_spec.get('tags',[]))
+                        msg = (
+                            f"ElecLab API Monitor - Khoi dong\n"
+                            f"Ngay: {now}\n\n"
+                            f"Tong quan ban dau:\n"
+                            f"Endpoints: {ep_count}\n"
+                            f"Schemas: {schemas}\n"
+                            f"Tags: {tags}\n\n"
+                            f"Snapshot da luu. Tu day moi thay doi se duoc thong bao."
+                        )
+                        send_telegram(msg)
+                        print(f"Snapshot tao xong: {ep_count} endpoints")
+else:
+            diff = compare_specs(old_snapshot, new_spec)
+                total = len(diff['added']) + len(diff['removed']) + len(diff['changed'])
+            if total == 0 and not diff['schemas_added'] and not diff['schemas_removed']:
+                                print("Khong co thay doi")
+else:
+                save_snapshot(new_spec)
+                    analysis = analyze_diff_with_claude(diff, new_spec)
+                lines = []
+                lines.append(f"ElecLab API - Phat hien thay doi!")
+                lines.append(f"Ngay: {now}\n")
+                if diff['added']:   lines.append(f"Them: {len(diff['added'])} endpoints")
+                                    if diff['removed']: lines.append(f"Xoa: {len(diff['removed'])} endpoints")
+                                                        if diff['changed']: lines.append(f"Sua: {len(diff['changed'])} endpoints")
+                                                                            if diff['schemas_added']:   lines.append(f"Schema moi: +{len(diff['schemas_added'])}")
+                                                                                                if diff['schemas_removed']: lines.append(f"Schema xoa: -{len(diff['schemas_removed'])}")
+                                                                                                                    lines.append(f"\n---\n{analysis}")
+                send_telegram("\n".join(lines))
+                print(f"Gui thong bao: {total} thay doi")
